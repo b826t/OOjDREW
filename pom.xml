@@ -105,11 +105,11 @@
             </executions>
              <configuration>
                 <!-- TODO: Enter the credentials to your keystore to create signed releases -->
-                <skip>true</skip>
-                <keystore>/path/to/the/keystore</keystore>
-                <alias>Alias name</alias>
-                <storepass>Store password</storepass>
-                <keypass>Key password</keypass>
+                <skip>false</skip>
+                <keystore>C:\Users\mandrake\Desktop\mz.keystore</keystore>
+                <alias>mzjarkey</alias>
+                <storepass>mads01lcd</storepass>
+                <keypass>mads01lcd</keypass>
             </configuration>
         </plugin>
         <plugin>
