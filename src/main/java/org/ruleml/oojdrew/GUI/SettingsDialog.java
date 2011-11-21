@@ -32,18 +32,18 @@ public class SettingsDialog {
 	
 	public void applySettings()
 	{
-		config.setRuleMLCompatibilityModeEnabled(ui.getChckbxRuleMLCompatibilityModeSelected());
+		config.setValidateRuleMLEnabled(ui.getChckbxValidateRuleMLSelected());
+		config.setTextFontSize(ui.getSpinnerFontSizeValue());
 	}
 	
 	public void syncUI()
 	{
-		ui.setChckbxRuleMLCompatibilityModeSelected(config.getRuleMLCompatibilityModeEnabled());
+		ui.setChckbxValidateRuleMLSelected(config.getValidateRuleMLEnabled());
+		ui.setSpinnerFontSizeValue(config.getTextFontSize());
 	}
 	
 	public void show()
 	{
 		ui.setVisible(true);
-	}
-
-	//public void 
+	} 
 }

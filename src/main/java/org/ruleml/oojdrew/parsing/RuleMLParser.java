@@ -22,6 +22,8 @@ import java.io.IOException;
 import java.io.StringReader;
 import java.util.Iterator;
 import java.util.Vector;
+import java.util.prefs.PreferenceChangeEvent;
+import java.util.prefs.PreferenceChangeListener;
 
 import nu.xom.Builder;
 import nu.xom.Document;
@@ -30,6 +32,9 @@ import nu.xom.ValidityException;
 
 import org.ruleml.oojdrew.Configuration;
 import org.ruleml.oojdrew.util.DefiniteClause;
+import org.xml.sax.SAXException;
+import org.xml.sax.XMLReader;
+import org.xml.sax.helpers.XMLReaderFactory;
 
 /**
  * A class for parsing RuleML. This is broken into two section. The
@@ -47,13 +52,14 @@ import org.ruleml.oojdrew.util.DefiniteClause;
  * @author Marcel A. Ball
  * @version 0.89
  */
-public class RuleMLParser {
+public class RuleMLParser implements PreferenceChangeListener {
 
     /**
      * A buffer that stores clauses that have already been parsed.
      */
-    private Vector clauses;
+    private Vector<DefiniteClause> clauses;
     private Configuration config;
+    private boolean validateRuleML;
 
     /**
      * This is used to indicate what back-end parser to use. Currently only
@@ -73,8 +79,10 @@ public class RuleMLParser {
      * Constructs a new parser object.
      */
     public RuleMLParser(Configuration config) {
-        clauses = new Vector();
+        clauses = new Vector<DefiniteClause>();
         this.config = config;
+        config.addPreferenceChangeListener(this);
+        preferenceChange(null);
     }
 
     /**
@@ -83,7 +91,7 @@ public class RuleMLParser {
      *
      * @return Iterator An iterator over all clauses in the buffer.
      */
-    public Iterator iterator() {
+    public Iterator<DefiniteClause> iterator() {
         return clauses.iterator();
     }
 
@@ -92,9 +100,8 @@ public class RuleMLParser {
      * allows the easy reuse of a parser object.
      */
     public void clear() {
-        clauses = null;
+        clauses = new Vector<DefiniteClause>();
         System.gc();
-        clauses = new Vector();
     }
 
     /**
@@ -122,10 +129,32 @@ public class RuleMLParser {
      */
     public void parseRuleMLString(RuleMLFormat format, String contents) throws
             ParseException, ParsingException, ValidityException, IOException {
-   		Builder bl = new Builder();
-   		StringReader sr = new StringReader(contents);
-  	 	Document doc = bl.build(sr);
-  	 	parseDocument(format, doc);
+    	
+    	if (validateRuleML) {
+        	XMLReader xmlReader;
+        	try {
+        		xmlReader = XMLReaderFactory.createXMLReader("org.apache.xerces.parsers.SAXParser"); 
+        		xmlReader.setFeature("http://apache.org/xml/features/validation/schema", true);
+    		} catch (SAXException e) {
+    			throw new ParseException("Unable to create XML validator");
+    		}
+        	
+       		Builder bl = new Builder(xmlReader, true);
+       		StringReader sr = new StringReader(contents);
+       		Document doc;
+       		try {
+       			doc = bl.build(sr);	
+       	  	 	parseDocument(format, doc);
+			} catch (Exception e) {
+				throw new ParseException(
+						"Document does not validate against the specified XML schema definition(s)!");
+			}
+    	} else {
+	   		Builder bl = new Builder();
+	   		StringReader sr = new StringReader(contents);
+	  	 	Document doc = bl.build(sr);
+	  	 	parseDocument(format, doc);
+    	}
     }
     
     /**
@@ -154,7 +183,7 @@ public class RuleMLParser {
 	public void parseDocument(RuleMLFormat format, Document doc)
 			throws ParseException, ParsingException, ValidityException
 	{
-		RuleMLDocumentParser parser = new RuleMLDocumentParser(format, config, clauses);
+		RuleMLDocumentParser parser = new RuleMLDocumentParser(format, clauses);
 
 		parser.parseRuleMLDocument(doc);
 	}
@@ -174,5 +203,9 @@ public class RuleMLParser {
 		parseRuleMLString(RuleMLFormat.RuleMLQuery, contents);
 		
 		return (DefiniteClause) clauses.lastElement();
+	}
+
+	public void preferenceChange(PreferenceChangeEvent evt) {
+		validateRuleML = config.getValidateRuleMLEnabled();
 	}
 }

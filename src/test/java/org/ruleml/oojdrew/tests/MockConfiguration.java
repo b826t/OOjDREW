@@ -17,17 +17,30 @@
 
 package org.ruleml.oojdrew.tests;
 
+import java.util.prefs.PreferenceChangeListener;
+
 import org.ruleml.oojdrew.Configuration;
 
 public class MockConfiguration implements Configuration {
 	private boolean ruleMLCompatibilityModeEnabled;
 	
-	public boolean getRuleMLCompatibilityModeEnabled() {
+	public boolean getValidateRuleMLEnabled() {
 		return ruleMLCompatibilityModeEnabled;
 	}
 
-	public void setRuleMLCompatibilityModeEnabled(boolean enabled) {
+	public void setValidateRuleMLEnabled(boolean enabled) {
 		ruleMLCompatibilityModeEnabled = enabled;
+	}
+
+	public int getTextFontSize() {
+		throw new UnsupportedOperationException();
+	}
+
+	public void setTextFontSize(int newSize) {
+		throw new UnsupportedOperationException();
+	}
+
+	public void addPreferenceChangeListener(PreferenceChangeListener listener) {
 	}
 
 }

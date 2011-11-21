@@ -17,20 +17,35 @@
 
 package org.ruleml.oojdrew.tests;
 
-import java.io.IOException;
-
-import nu.xom.ParsingException;
-import nu.xom.ValidityException;
+import junit.framework.TestCase;
 
 import org.ruleml.oojdrew.Configuration;
-import org.ruleml.oojdrew.parsing.ParseException;
 import org.ruleml.oojdrew.parsing.RuleMLParser;
 import org.ruleml.oojdrew.parsing.RuleMLParser.RuleMLFormat;
 
-import junit.framework.TestCase;
-
 public class RuleMLParserTest extends TestCase {
 	private Configuration config;
+	
+	public static void main(String[] args)
+	{
+		try
+		{
+			RuleMLParserTest test = new RuleMLParserTest("RuleML 0.91 Compatibility Parsing (discount)");
+			test.testRuleML91CompatibilityParsing();
+			
+			test = new RuleMLParserTest("RuleML 0.91 Parsing (discount)");
+			test.testRuleML91Parsing();
+			
+			test = new RuleMLParserTest("RuleML 1.0 Parsing (discount)");
+			test.testRuleML100Parsing();
+			
+			System.out.println("All tests passed.");
+		} catch (Exception e)
+		{
+			e.printStackTrace();
+		}
+		
+	}
 	
 	public RuleMLParserTest(String testName)
 	{
@@ -40,22 +55,19 @@ public class RuleMLParserTest extends TestCase {
 
 	public void testRuleML91CompatibilityParsing()
 	{
-		config.setRuleMLCompatibilityModeEnabled(true);
+		config.setValidateRuleMLEnabled(true);
 		genericRuleMLParsingTest("src/test/java/org/ruleml/oojdrew/tests/RuleMLTestCases/discount_091_compat.ruleml.xml", false);
-		
-		config.setRuleMLCompatibilityModeEnabled(false);
-		genericRuleMLParsingTest("src/test/java/org/ruleml/oojdrew/tests/RuleMLTestCases/discount_091_compat.ruleml.xml", true);
 	}
 	
 	public void testRuleML91Parsing()
 	{
-		config.setRuleMLCompatibilityModeEnabled(false);
+		config.setValidateRuleMLEnabled(false);
 		genericRuleMLParsingTest("src/test/java/org/ruleml/oojdrew/tests/RuleMLTestCases/discount-0.91.ruleml.xml", false);
 	}
 	
 	public void testRuleML100Parsing()
 	{
-		config.setRuleMLCompatibilityModeEnabled(false);
+		config.setValidateRuleMLEnabled(false);
 		genericRuleMLParsingTest("src/test/java/org/ruleml/oojdrew/tests/RuleMLTestCases/discount-1.0.ruleml.xml", false);
 	}
 	
@@ -68,6 +80,7 @@ public class RuleMLParserTest extends TestCase {
 		try {
 			rmlParser.parseFile(RuleMLFormat.RuleML91, ruleMLFile);
 		} catch (Exception e1) {
+			e1.printStackTrace();
 			thrown = true;
 		}
 		

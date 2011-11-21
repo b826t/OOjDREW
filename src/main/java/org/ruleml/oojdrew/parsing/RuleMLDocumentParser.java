@@ -21,8 +21,6 @@ import java.util.Enumeration;
 import java.util.Hashtable;
 import java.util.Iterator;
 import java.util.Vector;
-import java.util.prefs.PreferenceChangeEvent;
-import java.util.prefs.PreferenceChangeListener;
 
 import nu.xom.Attribute;
 import nu.xom.Document;
@@ -30,7 +28,6 @@ import nu.xom.Element;
 import nu.xom.Elements;
 
 import org.apache.log4j.Logger;
-import org.ruleml.oojdrew.Configuration;
 import org.ruleml.oojdrew.parsing.RuleMLParser.RuleMLFormat;
 import org.ruleml.oojdrew.util.DefiniteClause;
 import org.ruleml.oojdrew.util.SymbolTable;
@@ -52,23 +49,18 @@ import org.ruleml.oojdrew.util.Types;
  * @version 0.93
  */
 
-public class RuleMLDocumentParser implements PreferenceChangeListener {
+public class RuleMLDocumentParser{
 
-    private Hashtable skolemMap;
+    private Hashtable<String, String> skolemMap;
 
-    private Vector clauses;
+    private Vector<DefiniteClause> clauses;
                   
-    private Vector variableNames;
+    private Vector<String> variableNames;
     
     /**
      * This is used for generating unique anonymous variable ids
      */
-    private static int anonid = 1;
-
-    /**
-     * This is used to indicate if the document has an inner close attribute.
-     */
-    private boolean hasMapClosure = false;
+    private int anonid = 1;
     
     /**
      * RuleML tag names
@@ -79,8 +71,17 @@ public class RuleMLDocumentParser implements PreferenceChangeListener {
 
     private Logger logger = Logger.getLogger("jdrew.oo.util.RuleMLParser");
 
-    private Configuration config;
-    private boolean compatibilityMode;
+    /**
+     * A vector to hold the class information for the variables in the current
+     * clause. This is used for normalizing the types given to a variable if
+     * more than one type is given to a variable.
+     *
+     * For example: in the following clause p(?x: type1, ?x:type2). the types
+     * are not the same on all occurrences of the variable ?x - therefore the
+     * types will be normalized and receive a type that is the intersection of
+     * type1 and type2.
+     */
+    private Hashtable<Integer, Vector<Integer>> varClasses;
 
     /**
      * Constructs the back-end parser.
@@ -88,15 +89,12 @@ public class RuleMLDocumentParser implements PreferenceChangeListener {
      * @param clauses Vector The vector to use as a buffer - this is generally
      * passed by the RuleMLParser front-end.
      */
-    public RuleMLDocumentParser(RuleMLFormat format, Configuration config, Vector clauses) {
+    public RuleMLDocumentParser(RuleMLFormat format, Vector<DefiniteClause> clauses) {
         this.clauses = clauses;
         
         // Set default RuleML version
         this.rulemlFormat = format;
         this.tagNames = new RuleMLTagNames(format);
-        
-        this.config = config;
-        readConfig();
     }
 
     /**
@@ -111,7 +109,7 @@ public class RuleMLDocumentParser implements PreferenceChangeListener {
      */
             
     public void parseRuleMLDocument(Document doc) throws ParseException {
-        this.skolemMap = new Hashtable();
+        this.skolemMap = new Hashtable<String, String>();
                
         Element root = doc.getRootElement();        
         Element firstChild = null;
@@ -151,7 +149,6 @@ public class RuleMLDocumentParser implements PreferenceChangeListener {
 		// Otherwise use Query as root attribute
 		else if (rulemlFormat.equals(RuleMLFormat.RuleMLQuery) && rootName.equals(tagNames.QUERY))
 		{
-			hasMapClosure = true;
 			// Use query element as first child
 			firstChild = root;
 		}
@@ -161,27 +158,19 @@ public class RuleMLDocumentParser implements PreferenceChangeListener {
             throw new ParseException(
                     "RuleML or Assert element must contain an Rulebase or an And element!");
         }
-
-        if (firstChild.getAttribute(tagNames.MAPCLOSURE) != null) {
-            hasMapClosure = true;
-            if (!firstChild.getAttributeValue(tagNames.MAPCLOSURE).equals(tagNames.UNIVERSAL)) {
-                throw new ParseException(
-                        "Only universal inner closures are currently supported.");
-            }
-        } else {
-            logger.info("Document root has no mapClosure attribute. Indiviual clauses must have closure attributes.");
-        }
 	
-        Elements els = firstChild.getChildElements();
-        for (int i = 0; i < els.size(); i++) {
-            Element el = els.get(i);
-            if (el.getLocalName().equals(tagNames.ATOM)) {
-                clauses.add(parseFact(el));
-            } else if (el.getLocalName().equals(tagNames.NEG)){
-                clauses.addAll(parseNegFact(el));
-            }
-            else if (el.getLocalName().equals(tagNames.IMPLIES)) {
-                clauses.addAll(parseImplies(el));
+        Elements children = firstChild.getChildElements();
+        for (int i = 0; i < children.size(); i++) {
+            Element child = skipRoleTag(children.get(i));
+            String childName = child.getLocalName();
+            if (childName.equals(tagNames.ATOM)) {
+            	resetVariables();
+                clauses.add(parseFact(child));
+            } else if (childName.equals(tagNames.NEG)){
+                clauses.addAll(parseNegFact(child));
+            } else if (childName.equals(tagNames.IMPLIES)) {
+            	resetVariables();
+                clauses.addAll(parseImplies(child));
             }
         }
     }
@@ -189,7 +178,7 @@ public class RuleMLDocumentParser implements PreferenceChangeListener {
     /**
      * This method is used to parse an Assertion in the RuleML Document.
      *
-     * @param ass Element The XOM Element objec that represents the assertion.
+     * @param ass Element The XOM Element object that represents the assertion.
      *
      * @return Term A term object that represents the assertion in a way that
      * can be used by the reasoning engine.
@@ -197,19 +186,14 @@ public class RuleMLDocumentParser implements PreferenceChangeListener {
      * @throws ParseException Thrown if there is a serious error parsing the
      * assertion.
      */
-          
     private Term parseAssert(Element ass) throws ParseException {
-        Elements els = ass.getChildElements();
-        if (els.size() != 1) {
-            throw new ParseException(
-                    "An Assert element can only contain one child.");
-        }
+        Elements children = ass.getChildElements();
+        
+        Element firstChild = skipRoleTag(children.get(0));
 		
-        Element el = els.get(0);
-		
-        if (el.getLocalName().equals(tagNames.ATOM)) {
-            DefiniteClause dc = parseFact(el, false);
-            Vector v = new Vector();
+        if (firstChild.getLocalName().equals(tagNames.ATOM)) {
+            DefiniteClause dc = parseFact(firstChild);
+            Vector<Term> v = new Vector<Term>();
             for (int i = 0; i < dc.atoms.length; i++) {
                 v.add(dc.atoms[i]);
             }
@@ -217,10 +201,10 @@ public class RuleMLDocumentParser implements PreferenceChangeListener {
                               Types.IOBJECT, v);
             t.setAtom(true);
             return t;
-        } else if (el.getLocalName().equals(tagNames.IMPLIES)) {
-            Vector v2 = parseImplies(el, false);
+        } else if (firstChild.getLocalName().equals(tagNames.IMPLIES)) {
+            Vector<DefiniteClause> v2 = parseImplies(firstChild);
             DefiniteClause dc = (DefiniteClause)v2.get(0);
-            Vector v = new Vector();
+            Vector<Term> v = new Vector<Term>();
             for (int i = 0; i < dc.atoms.length; i++) {
                 v.add(dc.atoms[i]);
             }
@@ -245,9 +229,8 @@ public class RuleMLDocumentParser implements PreferenceChangeListener {
      * @throws ParseException Thrown if there is a serious error parsing the
      * negFact.
      */
-    private Vector parseNegFact(Element neg) throws ParseException {
-        this.variableNames = new Vector();
-        this.varClasses = new Hashtable();
+    private Vector<DefiniteClause> parseNegFact(Element neg) throws ParseException {
+        resetVariables();
 
         Elements atoms = neg.getChildElements("Atom");
         if(atoms.size() != 1){
@@ -255,33 +238,19 @@ public class RuleMLDocumentParser implements PreferenceChangeListener {
             throw new ParseException("OO jDREW only supports classical negation over single atoms.");
         }
 		
-        Element atom = atoms.get(0);
+        Element firstAtom = skipRoleTag(atoms.get(0));
+	
+        Term atm = parseAtom(firstAtom, true, true);
 
-        if (!hasMapClosure)
-        {
-            String closure = atom.getAttributeValue(tagNames.CLOSURE);
-            if (closure == null) {
-                logger.error("No closure on clause.");
-                throw new ParseException("No closure on clause.");
-            }
-
-            if (!closure.equals(tagNames.UNIVERSAL)) {
-                logger.error("Only universal closures are currently supported.");
-                throw new ParseException("Only universal inner closures are currently supported.");
-            }
-        }
-		
-        Term atm = parseAtom(atom, true, true);
-
-        Hashtable types = this.buildTypeTable();
+        Hashtable<Integer, Integer> types = this.buildTypeTable();
         this.fixVarTypes(atm, types);
 
-        Vector atms = new Vector();
+        Vector<Term> atms = new Vector<Term>();
         atms.add(atm);
 
         DefiniteClause dc = new DefiniteClause(atms, variableNames);
 
-        Vector v = new Vector();
+        Vector<DefiniteClause> v = new Vector<DefiniteClause>();
         v.add(dc);
 
         // Add code to generate consistency check
@@ -307,25 +276,6 @@ public class RuleMLDocumentParser implements PreferenceChangeListener {
     }
 
     /**
-     * This method is used to parse a fact element. The use of this method is
-     * deprecated; new code should use
-     * parseFact(Element atom, boolean newVarnames); this version is provided
-     * for backwards compatability only.
-     *
-     * @param atom Element The XOM Element object that represents the fact to be
-     * parsed.
-     *
-     * @return DefiniteClause A DefiniteClause data structure that represents
-     * the fact in a way that can be used by the reasoning engine.
-     *
-     * @throws ParseException Thrown if there is a serious error parsing the
-     * fact.
-     */
-    private DefiniteClause parseFact(Element atom) throws ParseException {
-        return parseFact(atom, true);
-    }
-
-    /**
      * This method is used to parse a fact element, creating a new variable
      * name list if indicated. Typically a new variable list is wanted; but in
      * certain cases (such as parsing an inner clause in an assert) the same
@@ -343,57 +293,17 @@ public class RuleMLDocumentParser implements PreferenceChangeListener {
      * @throws ParseException Thrown if there is a serious error parsing the
      * fact.
      */
-    private DefiniteClause parseFact(Element atom, boolean newVarnames) throws
-            ParseException {
-        if (newVarnames) {
-            this.variableNames = new Vector();
-            this.varClasses = new Hashtable();
-        }
-		
-        if (!hasMapClosure) {
-            //No inner close - should have
-            String closure = atom.getAttributeValue(tagNames.CLOSURE);
-            if (closure == null) {
-                logger.error("No closure on clause.");
-                throw new ParseException("No closure on clause.");
-            }
-
-            if (!closure.equals(tagNames.UNIVERSAL)) {
-                logger.error("Only universal closures are currently supported.");
-                throw new ParseException(
-                        "Only universal inner closures are currently supported.");
-            }
-        }
-
+    private DefiniteClause parseFact(Element atom) throws ParseException {
         Term atm = parseAtom(atom, true, false);
 
-        Hashtable types = this.buildTypeTable();
+        Hashtable<Integer, Integer> types = this.buildTypeTable();
         this.fixVarTypes(atm, types);
 
-        Vector atoms = new Vector();
+        Vector<Term> atoms = new Vector<Term>();
         atoms.add(atm);
 
         DefiniteClause dc = new DefiniteClause(atoms, variableNames);
         return dc;
-    }
-
-    /**
-     * This method is used to parse a implies (implication) element. The use of
-     * this method is deprecated; new code should use
-     * parseImplies(Element atom, boolean newVarnames); this version is provided
-     * for backwards compatability only.
-     *
-     * @param implies Element The XOM Element objec that represents the
-     * implication to be parsed.
-     *
-     * @return DefiniteClause A DefiniteClause data structure that represents
-     * the implication in a way that can be used by the reasoning engine.
-     *
-     * @throws ParseException Thrown if there is a serious error parsing the
-     * implication.
-     */
-    private Vector parseImplies(Element implies) throws ParseException {
-        return parseImplies(implies, true);
     }
 
     /**
@@ -414,46 +324,25 @@ public class RuleMLDocumentParser implements PreferenceChangeListener {
      * @throws ParseException Thrown if there is a serious error parsing the
      * implication.
      */
-    private Vector parseImplies(Element implies, boolean newVarnames) throws
-            ParseException {
-        if (newVarnames) {
-            this.variableNames = new Vector();
-            this.varClasses = new Hashtable();
-        }
+    private Vector<DefiniteClause> parseImplies(Element implies) throws
+    	ParseException {
 
-        Vector newclauses = new Vector();
+        Vector<DefiniteClause> newclauses = new Vector<DefiniteClause>();
 
-        if (!hasMapClosure) {
-            //No inner close - should have
-            String closure = implies.getAttributeValue(tagNames.CLOSURE);
-            if (closure == null) {
-                logger.error("No closure on clause.");
-                throw new ParseException("No closure on clause.");
-            }
-
-            if (!closure.equals(tagNames.UNIVERSAL)) {
-                logger.error("Only universal closures are currently supported.");
-                throw new ParseException(
-                        "Only universal inner closures are currently supported.");
-            }
-        }
 		// Implies must have two children (excluding OID elements)
         Elements children = implies.getChildElements();
-        if (getElementCount(children) != 2) {
-            throw new ParseException(
-                    "Implies element must contain a premise and a conclusion element.");
+        
+        // Set first and second child and skip OID element if exists.
+        Element firstChild = skipRoleTag(children.get(0));
+        Element secondChild = skipRoleTag(children.get(1));
+        if (firstChild.getLocalName().equals(tagNames.OID))
+        {
+        	firstChild = skipRoleTag(children.get(1));
+        	secondChild = skipRoleTag(children.get(2));
         }
         
-        int currentIndex = getFirstChildElementIndex(children, 0);
-        Element firstChild = children.get(currentIndex);
         String firstChildName = firstChild.getLocalName();
-        
-        currentIndex = getFirstChildElementIndex(children, currentIndex + 1);
-        Element secondChild = children.get(currentIndex);
-        
-        Element premise;
-        Element conclusion;
-        
+        Element premise, conclusion;
         // Check if implies starts with premise element
 		if (firstChildName.equals(tagNames.PREMISE100) || firstChildName.equals(tagNames.PREMISE))
 		{
@@ -467,30 +356,26 @@ public class RuleMLDocumentParser implements PreferenceChangeListener {
 			conclusion = firstChild.getChildElements().get(0);
 		}
 		// No premise or conclusion tag available
-		else if (compatibilityMode)
-		{
-			// Use backwards compatibility 
-	        premise = firstChild;
-	        conclusion = secondChild;
-		}
 		else
 		{
 			// Use default order
-	        premise = secondChild;
-	        conclusion = firstChild;
+	        premise = firstChild;
+	        conclusion = secondChild;
 		}
+		
+		premise = skipRoleTag(premise);
+		conclusion = skipRoleTag(conclusion);
 
-        Vector atoms = new Vector();
-        
+        Vector<Term> subterms = new Vector<Term>();
         if (conclusion.getLocalName().equals(tagNames.ATOM)) {
-            atoms.add(parseAtom(conclusion, true, false));
+            subterms.add(parseAtom(conclusion, true, false));
         } else if (conclusion.getLocalName().equals(tagNames.NEG)){
             Elements headatms = conclusion.getChildElements(tagNames.ATOM);
             if(headatms.size() != 1)
                 throw new ParseException("Neg should have one ATOM element");
 
             Term atom = parseAtom(headatms.get(0), true, true);
-            atoms.add(atom);
+            subterms.add(atom);
 
             String atomstr = atom.toPOSLString(true);
 
@@ -504,35 +389,36 @@ public class RuleMLDocumentParser implements PreferenceChangeListener {
                 DefiniteClause dc2 = pp.parseDefiniteClause(clause);
                 if (dc2 != null)
                     newclauses.add(dc2);
-            } catch(Exception e){
+            } catch(Exception e) {
                 throw new ParseException("Error creating inconsistency check rule.");
             }
         } else {
             throw new ParseException(
                     "Second element of Implies should always be an Atom or Neg element.");
         }
-
-        if (premise.getLocalName().equals(tagNames.ATOM)) {
-            atoms.add(parseAtom(premise, false, false));
-        } else if (premise.getLocalName().equals(tagNames.NAF)) {
-            atoms.add(parseNaf(premise));
-        } else if (premise.getLocalName().equals(tagNames.ASSERT)) {
-            atoms.add(parseAssert(premise));
-        } else if (premise.getLocalName().equals(tagNames.NEG)) {
-            atoms.add(parseAtom(premise, false, true));
-        }
-        else if (premise.getLocalName().equals(tagNames.AND)) {
+        
+        String premiseName = premise.getLocalName();
+        
+        if (premiseName.equals(tagNames.ATOM)) {
+            subterms.add(parseAtom(premise, false, false));
+        } else if (premiseName.equals(tagNames.NAF)) {
+            subterms.add(parseNaf(premise));
+        } else if (premiseName.equals(tagNames.ASSERT)) {
+            subterms.add(parseAssert(premise));
+        } else if (premiseName.equals(tagNames.NEG)) {
+            subterms.add(parseAtom(premise, false, true));
+        } else if (premiseName.equals(tagNames.AND)) {
             children = premise.getChildElements();
             for (int i = 0; i < children.size(); i++) {
-                Element el = children.get(i);
+                Element el = skipRoleTag(children.get(i));
                 if (el.getLocalName().equals(tagNames.ATOM)) {
-                    atoms.add(parseAtom(el, false, false));
+                    subterms.add(parseAtom(el, false, false));
                 } else if (el.getLocalName().equals(tagNames.NAF)) {
-                    atoms.add(parseNaf(el));
+                    subterms.add(parseNaf(el));
                 } else if (el.getLocalName().equals(tagNames.ASSERT)) {
-                    atoms.add(parseAssert(el));
+                    subterms.add(parseAssert(el));
                 } else if (el.getLocalName().equals(tagNames.NEG)){
-                    atoms.add(parseAtom(el, false, true));
+                    subterms.add(parseAtom(el, false, true));
                 } else {
                     throw new ParseException(
                             "Implies And element should only contain Atom and Naf elements.");
@@ -544,9 +430,9 @@ public class RuleMLDocumentParser implements PreferenceChangeListener {
         }
 
         logger.debug("Building Types");
-        Hashtable types = this.buildTypeTable();
+        Hashtable<Integer, Integer> types = this.buildTypeTable();
         logger.debug("Built Types");
-        Iterator it = atoms.iterator();
+        Iterator<Term> it = subterms.iterator();
         int i = 0;
         while(it.hasNext()){
             Term t = (Term)it.next();
@@ -554,7 +440,7 @@ public class RuleMLDocumentParser implements PreferenceChangeListener {
             logger.debug("Fixed atom : " + i++);
         }
 
-        DefiniteClause dc = new DefiniteClause(atoms, variableNames);
+        DefiniteClause dc = new DefiniteClause(subterms, variableNames);
         newclauses.add(0, dc);
         return newclauses;
     }
@@ -571,23 +457,11 @@ public class RuleMLDocumentParser implements PreferenceChangeListener {
      */
        
     private Term parseOid(Element oid) throws ParseException {
-        Element el = oid.getChildElements().get(0);
-        Term t;
-        if (el.getLocalName().equals(tagNames.IND)) {
-            t = parseInd(el);
-        } else if(el.getLocalName().equals(tagNames.DATA)) {
-            t = parseData(el);
-        } else if(el.getLocalName().equals(tagNames.SKOLEM)) {
-            t = parseVar(el);
-        } else if (el.getLocalName().equals(tagNames.VAR)) {
-            t = parseVar(el);
-        } else if (el.getLocalName().equals(tagNames.EXPR)) {
-            t = parseExpression(el);
-        } else {
-            throw new ParseException("oid can only contain Ind, Data, Var or Cterm.");
-        }
-        t.role = SymbolTable.IOID;
-        return t;
+        Element element = oid.getChildElements().get(0);
+        Term term = parseDefaultElement(element);
+        term.role = SymbolTable.IOID;
+
+        return term;
     }
 
     /**
@@ -602,22 +476,7 @@ public class RuleMLDocumentParser implements PreferenceChangeListener {
      */
      
     private Term parseInd(Element ind) throws ParseException {
-        String symbol = ind.getValue().trim();
-        int sym = SymbolTable.internSymbol(symbol);
-        Attribute type = ind.getAttribute(tagNames.TYPE);
-        
-        
-        
-        int typeid = Types.IOBJECT;
-        if (type != null) {
-            typeid = Types.typeID(type.getValue().trim());
-            if (typeid == -1) {
-                throw new ParseException("Type " + type.getValue().trim() +
-                                         " is not defined.");
-            }
-        }
-
-        return new Term(sym, SymbolTable.INOROLE, typeid);
+		return parseSimpleElement(ind);
     }
    
     /**
@@ -638,28 +497,10 @@ public class RuleMLDocumentParser implements PreferenceChangeListener {
      //Term Data has no role so it will probally not change
      
     private Term parseData(Element data) throws ParseException {
-        String symbol = data.getValue().trim();
-        int sym = SymbolTable.internSymbol(symbol);
-        
-      //Attribute type = data.getAttribute(XSITYPE,"http://www.w3.org/2001/XMLSchema-instance");
-        Attribute type = data.getAttribute(tagNames.TYPE);
-      
-		//if(type != null)       
-     	 //System.out.println("PRINTING: " + type.getValue()); 
-
-        int typeid = Types.IOBJECT;
-        if (type != null) {
-            typeid = Types.typeID(type.getValue().trim());
-            if (typeid == -1) {
-                throw new ParseException("Type " + type.getValue().trim() +
-                                         " is not defined.");
-            }
-        }
-
-        Term t1 = new Term(sym, SymbolTable.INOROLE, typeid);
-    	t1.setData(true);
-    
-    	return t1;
+    	Term term = parseSimpleElement(data);
+    	term.setData(true);
+    	
+    	return term;
     }
     
     /**
@@ -675,36 +516,27 @@ public class RuleMLDocumentParser implements PreferenceChangeListener {
      */
      
     private Term parseVar(Element var) throws ParseException {
-        String symbol = var.getValue().trim();
-        if (symbol.equals("")) {
-            symbol = "$ANON" + anonid++;
+        String symbolName = var.getValue().trim();
+        
+        if (symbolName.isEmpty()) {
+            symbolName = "$ANON" + anonid++;
         }
 
-        int sym = this.internVariable(symbol);
-        Attribute type = var.getAttribute(tagNames.TYPE);
-        int typeid = Types.IOBJECT;
-        if (type != null) {
-            typeid = Types.typeID(type.getValue().trim());
-            if (typeid == -1) {
-                throw new ParseException("Type " + type.getValue().trim() +
-                                         " is not defined.");
-            }
+        int sym = this.internVariable(symbolName);
+        int typeid = parseTypeAttribute(var);
+
+        logger.debug("Parsing variable: symbol = " + sym + " type = " + typeid);
+
+        Vector<Integer> v;
+        
+        if(this.varClasses.containsKey(sym)){
+            v = varClasses.get(sym);
+        } else {
+            v = new Vector<Integer>();
+            varClasses.put(sym, v);
         }
 
-        Integer symI = Integer.valueOf(sym);
-        Integer typeI = Integer.valueOf(typeid);
-
-        logger.debug("Parsing variable: symbol = " + symI + " type = " + typeI);
-
-        Vector v;
-        if(this.varClasses.containsKey(symI)){
-            v = (Vector)varClasses.get(symI);
-        }else{
-            v = new Vector();
-            varClasses.put(symI, v);
-        }
-
-        v.add(typeI);
+        v.add(typeid);
 
         logger.debug("Added Type Information");
 
@@ -722,23 +554,11 @@ public class RuleMLDocumentParser implements PreferenceChangeListener {
      *
      * @throws ParseException Thrown if there is an error parsing the plex.
      */
-        
     private Term parsePlex(Element plex) throws ParseException {
-        Elements els = plex.getChildElements();
-        Vector subterms = new Vector();
-               
-        for (int i = 0; i < els.size(); i++) {
-            Element el = els.get(i);
-            
-            if (!parseDefaultElement(el, subterms))
-            {
-                throw new ParseException(
-                        "Plex should only contain Plex, Cterm, Ind, Data, Var and slot, repo, resl.");
-            }
-        }
+        Vector<Term> subterms = parseDefaultElements(plex);
 
         Term t = new Term(SymbolTable.IPLEX, SymbolTable.INOROLE, Types.IOBJECT,
-                          subterms);
+                          subterms);        
         return t;
     }
     
@@ -754,9 +574,8 @@ public class RuleMLDocumentParser implements PreferenceChangeListener {
      * @throws ParseException Thrown if there is an error parsing the Expr.
      */
     private Term parseExpression(Element expr) throws ParseException {
-        
-        Elements els = expr.getChildElements();
-        Element op = els.get(0);
+    	Elements children = expr.getChildElements();
+        Element op = children.get(0);
         
         boolean foundOp = false;
         
@@ -771,7 +590,7 @@ public class RuleMLDocumentParser implements PreferenceChangeListener {
         }
         
         if(!foundOp){
-        	fun = els.get(0);
+        	fun = children.get(0);
         }
                 
         if (!fun.getLocalName().equals(tagNames.FUN)) {
@@ -780,28 +599,9 @@ public class RuleMLDocumentParser implements PreferenceChangeListener {
         }
 
         int symbol = SymbolTable.internSymbol(fun.getValue().trim());
+        int typeid = parseTypeAttribute(expr);
 
-        int typeid = Types.IOBJECT;
-        Attribute type = expr.getAttribute(tagNames.TYPE);
-        if (type != null) {
-            typeid = Types.typeID(type.getValue().trim());
-            if (typeid == -1) {
-                throw new ParseException("Type " + type.getValue().trim() +
-                                         " is not defined.");
-            }
-        }
-
-        Vector subterms = new Vector();
-        for (int i = 1; i < els.size(); i++) {
-            Element el = els.get(i);
-            
-            if (!parseDefaultElement(el, subterms))
-            {
-            	throw new ParseException(
-                        "Expr should only contain Plex, Expr, Ind, Data, Var and slot, repo, resl.");
-            }
-        }
-
+        Vector<Term> subterms = parseDefaultElements(expr);
         Term t = new Term(symbol, SymbolTable.INOROLE, typeid, subterms);
         return t;
     }
@@ -853,22 +653,22 @@ public class RuleMLDocumentParser implements PreferenceChangeListener {
 
         int symbol = SymbolTable.internSymbol(relname);
 
-        Vector subterms = new Vector();
+        Vector<Term> subterms = new Vector<Term>();
         int startIndex = getFirstChildElementIndex(children, 0) + 1;
         for (int i = startIndex; i < children.size(); i++) {
-            Element el = children.get(i);
-            
-            if (el.getLocalName().equals(tagNames.OID)) {
+            Element element = children.get(i);
+            Term term = null;
+            if (element.getLocalName().equals(tagNames.OID)) {
                 if (foundoid) {
                     throw new ParseException(
                             "Atom should only contain one oid element.");
                 }
-                subterms.add(parseOid(el));
+                term = parseOid(element);
                 foundoid = true;
-            } else if (!parseDefaultElement(el, subterms)) {
-                throw new ParseException(
-                        "Atom should only contain Plex, Expr, Ind, Data, Var, slot, repo, resl and oid.");
+            } else {
+            	term = parseDefaultElement(element);
             }
+            subterms.add(term);
         }
         
 		//if foundoid is false
@@ -882,14 +682,13 @@ public class RuleMLDocumentParser implements PreferenceChangeListener {
             } else {
                 String varname = "$ANON" + anonid++;
                 int symid = this.internVariable(varname);
-                Vector types = new Vector();
-                types.add(Integer.valueOf(Types.IOBJECT));
-                this.varClasses.put(new Integer(symid), types);
+                Vector<Integer> types = new Vector<Integer>();
+                types.add(Types.IOBJECT);
+                this.varClasses.put(symid, types);
                 Term t2 = new Term(symid, SymbolTable.IOID, Types.IOBJECT);
                 subterms.add(t2);
             }
         }
-
 		
         Term t = new Term(symbol, SymbolTable.INOROLE, Types.IOBJECT, subterms);
         t.setAtom(true);
@@ -909,52 +708,31 @@ public class RuleMLDocumentParser implements PreferenceChangeListener {
      */
     
     private Term parseSlot(Element slot) throws ParseException {
-        Elements els = slot.getChildElements();
-        if (els.size() != 2) {
-            throw new ParseException("Slot must have two child elements.");
-        }
+        Elements children = slot.getChildElements();
         
-        Element name = els.get(0);
+        Element firstChildName = children.get(0);
 		boolean dataSlot = false;
-		if(name.getLocalName().equals(tagNames.DATA)){
+		if(firstChildName.getLocalName().equals(tagNames.DATA)){
 			dataSlot = true;
 		}
        
-        if (!name.getLocalName().equals(tagNames.IND) && !name.getLocalName().equals(tagNames.DATA)) {
+        if (!firstChildName.getLocalName().equals(tagNames.IND) && !firstChildName.getLocalName().equals(tagNames.DATA)) {
             throw new ParseException("Only Ind and Data slot names are supported.");
         }    
 		//Getting the Role from the symbol Table, it will assign one if it
 		//doesnt already exist
-        int role = SymbolTable.internRole(name.getValue().trim());
+        int role = SymbolTable.internRole(firstChildName.getValue().trim());
        
-        Element value = els.get(1);
+        Element element = children.get(1);
+        Term term = parseDefaultElement(element);
         
-        Term t;
-		//Figuring out the type of term it should be
-        if (value.getLocalName().equals(tagNames.PLEX)) {
-            t = parsePlex(value);	
-        } else if (value.getLocalName().equals(tagNames.EXPR)) {
-            t = parseExpression(value);
-        } else if (value.getLocalName().equals(tagNames.IND)) {
-            t = parseInd(value);
-        } else if (value.getLocalName().equals(tagNames.DATA)) {
-            t = parseData(value);
-        } else if (value.getLocalName().equals(tagNames.SKOLEM)){
-            t = parseSkolem(value);
-        } else if (value.getLocalName().equals(tagNames.VAR)) {
-            t = parseVar(value);
-        } else {
-            throw new ParseException(
-                    "Slot value should be either Plex, Expr, Ind, Data or Var.");
-        }
-		
-        t.setRole(role);
+        term.setRole(role);
         
         if(dataSlot){
-        	t.setDataSlot(true);
+        	term.setDataSlot(true);
         }
         
-        return t;
+        return term;
     }
    
     /**
@@ -968,27 +746,12 @@ public class RuleMLDocumentParser implements PreferenceChangeListener {
      *
      * @throws ParseException Thrown if there is an error parsing the resl.
      */
-          
     private Term parseResl(Element resl) throws ParseException {
-        Elements els = resl.getChildElements();
-        if (els.size() > 1) {
-            throw new ParseException(
-                    "resl element should only contain child element.");
-        }
-
-        Element el = els.get(0);
-        Term t;
-        if (el.getLocalName().equals(tagNames.VAR)) {
-            t = parseVar(el);
-        } else if (el.getLocalName().equals(tagNames.PLEX)) {
-            t = parsePlex(el);
-        } else {
-            throw new ParseException(
-                    "resl element should only contain Var or Plex as a child element.");
-        }
-
-        t.setRole(SymbolTable.IREST);
-        return t;
+    	Elements children = resl.getChildElements();
+    	Element firstChild = skipRoleTag(children.get(0));
+    	Term t = parseDefaultElement(firstChild);
+    	t.setRole(SymbolTable.IREST);
+    	return t;
     }
 
     /**
@@ -1002,25 +765,8 @@ public class RuleMLDocumentParser implements PreferenceChangeListener {
      *
      * @throws ParseException Thrown if there is an error parsing the repo.
      */ 
-     
     private Term parseRepo(Element repo) throws ParseException {
-        Elements els = repo.getChildElements();
-        if (els.size() > 1) {
-            throw new ParseException(
-                    "repo element should only contain child element.");
-        }
-
-        Element el = els.get(0);
-        Term t;
-        if (el.getLocalName().equals(tagNames.VAR)) {
-            t = parseVar(el);
-        } else if (el.getLocalName().equals(tagNames.PLEX)) {
-            t = parsePlex(el);
-        } else {
-            throw new ParseException(
-                    "repo element should only contain Var or Plex as a child element.");
-        }
-
+    	Term t = parseResl(repo);
         t.setRole(SymbolTable.IPREST);
         return t;
     }
@@ -1038,20 +784,16 @@ public class RuleMLDocumentParser implements PreferenceChangeListener {
      */ 
 
     private Term parseNaf(Element naf) throws ParseException {
-        Elements els = naf.getChildElements();
-        if (els.size() != 1) {
-            throw new ParseException(
-                    "Naf elements should only contain one child.");
-        }
-
-        Element el = els.get(0);
-        Vector subterms = new Vector();
+        Elements children = naf.getChildElements();
+        Element el = skipRoleTag(children.get(0));
+        
+        Vector<Term> subterms = new Vector<Term>();
         if (el.getLocalName().equals(tagNames.ATOM)) {
             subterms.add(parseAtom(el, false, false));
         } else if (el.getLocalName().equals(tagNames.AND)) {
-            els = el.getChildElements();
-            for (int i = 0; i < els.size(); i++) {
-                Element el2 = els.get(i);
+            children = el.getChildElements();
+            for (int i = 0; i < children.size(); i++) {
+                Element el2 = children.get(i);
                 if (!el2.getLocalName().equals(tagNames.ATOM)) {
                     throw new ParseException(
                             "And child of Naf element should only contain Atom elements.");
@@ -1082,16 +824,16 @@ public class RuleMLDocumentParser implements PreferenceChangeListener {
      *
      * @throws ParseException Thrown if there is an error parsing the sko.
      */ 
-     
     private Term parseSkolem(Element sko) throws ParseException{
         String skoname = sko.getValue().trim();
 
-        if(skoname.equals("")){
-            return new Term(SymbolTable.internSymbol("$gensym" + SymbolTable.genid++),
-                            SymbolTable.INOROLE, Types.ITHING);
+        if(skoname.isEmpty()){
+            return new Term(SymbolTable.internSymbol("$gensym" +
+            				SymbolTable.genid++), SymbolTable.INOROLE,
+            				Types.ITHING);
         }else{
             if(this.skolemMap.containsKey(skoname)){
-                String sym = (String)skolemMap.get(skoname);
+                String sym = skolemMap.get(skoname);
                 return new Term(SymbolTable.internSymbol(sym),
                                   SymbolTable.INOROLE, Types.ITHING);
             }else{
@@ -1114,7 +856,6 @@ public class RuleMLDocumentParser implements PreferenceChangeListener {
      *
      * @return int The integer identifier for this variable
      */
-        
     private int internVariable(String varName) {
         int idx;
 
@@ -1128,38 +869,25 @@ public class RuleMLDocumentParser implements PreferenceChangeListener {
     }
 
     /**
-     * A vector to hold the class information for the variables in the current
-     * clause. This is used for normalizing the types given to a variable if
-     * more than one type is given to a variable.
-     *
-     * For example: in the following clause p(?x: type1, ?x:type2). the types
-     * are not the same on all occurances of the variable ?x - therefore the
-     * types will be normalized and receive a type that is the intersection of
-     * type1 and type2.
-     */
-    private Hashtable varClasses;
-
-    /**
      * A method that will go through a term and fix all variable types to be
      * consistant.
      *
-     * @param ct Term The term to normalize the types in.
+     * @param complexTerm Term The term to normalize the types in.
      *
      * @param types Hashtable A hash table containing the normalized types for
      * each variable in the clause.
      */
- 
-    private void fixVarTypes(Term ct, Hashtable types) {
-       // logger.debug("Fixing term: " + ct.toPOSLString(true));
-        for (int i = 0; i < ct.subTerms.length; i++) {
-            if (ct.subTerms[i].isCTerm()) {
-                fixVarTypes(ct.subTerms[i], types);
-            } else if (ct.subTerms[i].getSymbol() < 0) {
-                Integer sym = Integer.valueOf(ct.subTerms[i].getSymbol());
+    private void fixVarTypes(Term complexTerm, Hashtable<Integer, Integer> types) {
+       // logger.debug("Fixing term: " + complexTerm.toPOSLString(true));
+        for (int i = 0; i < complexTerm.subTerms.length; i++) {
+            if (complexTerm.subTerms[i].isExpr()) {
+                fixVarTypes(complexTerm.subTerms[i], types);
+            } else if (complexTerm.subTerms[i].getSymbol() < 0) {
+                Integer sym = complexTerm.subTerms[i].getSymbol();
                 //logger.debug("Fixing symbol = " + sym);
                 Integer type = (Integer)types.get(sym);
                 //logger.debug("Type = " + type);
-                ct.subTerms[i].type = type.intValue();
+                complexTerm.subTerms[i].type = type.intValue();
             }
         }
     }
@@ -1174,21 +902,20 @@ public class RuleMLDocumentParser implements PreferenceChangeListener {
      * have a normalized form (type that is an intersection of all given types);
      * since Nothing inherits from all types this should never occur.
      */
-
-    private Hashtable buildTypeTable() throws ParseException {
-        Hashtable ht = new Hashtable();
-        Enumeration e = varClasses.keys();
+    private Hashtable<Integer, Integer> buildTypeTable() throws ParseException {
+        Hashtable<Integer, Integer> ht = new Hashtable<Integer, Integer>();
+        Enumeration<Integer> e = varClasses.keys();
 
         while (e.hasMoreElements()) {
-            Object key = e.nextElement();
-            Vector value = (Vector) varClasses.get(key);
+            int key = e.nextElement();
+            Vector<Integer> value = varClasses.get(key);
             int[] types = new int[value.size()];
             for (int i = 0; i < types.length; i++) {
                 types[i] = ((Integer) value.get(i)).intValue();
             }
 
             int type = Types.greatestLowerBound(types);
-            ht.put(key, Integer.valueOf(type));
+            ht.put(key, type);
         }
         return ht;
     }
@@ -1199,35 +926,108 @@ public class RuleMLDocumentParser implements PreferenceChangeListener {
      * Known elements are: Plex, Expr, Ind, Data, Var, slot, repo, resl
      * 
      * @param el Element to parse
-     * @param subterms Subterm to add parsed subterm to
-     * @return True if elements has been found and parsed, otherwise false
-     * @throws ParseException
+     * @return Parsed element as Term
+     * @throws ParseException Thrown if this method is not able to handle
+     * element. 
      */
-    private boolean parseDefaultElement(Element el, Vector subterms) throws ParseException
+    private Term parseDefaultElement(Element el) throws ParseException
     {
-        if (el.getLocalName().equals(tagNames.PLEX)) {
-            subterms.add(parsePlex(el));
-        } else if (el.getLocalName().equals(tagNames.EXPR)) {
-            subterms.add(parseExpression(el));
-        } else if (el.getLocalName().equals(tagNames.IND)) {
-            subterms.add(parseInd(el));
-        } else if (el.getLocalName().equals(tagNames.DATA)) {
-            subterms.add(parseData(el));
-        } else if (el.getLocalName().equals(tagNames.SKOLEM)) {
-            subterms.add(parseSkolem(el));
-        } else if (el.getLocalName().equals(tagNames.VAR)) {
-            subterms.add(parseVar(el));
-        } else if (el.getLocalName().equals(tagNames.SLOT)) {
-            subterms.add(parseSlot(el));
-        } else if (el.getLocalName().equals(tagNames.RESL)) {
-            subterms.add(parseResl(el));
-        } else if (el.getLocalName().equals(tagNames.REPO)) {
-            subterms.add(parseRepo(el));
-        } else {
-        	return false;
+    	String elementName = el.getLocalName();
+    	Term result = null;
+    	
+        if (elementName.equals(tagNames.PLEX)) {
+        	result = parsePlex(el);
+        } else if (elementName.equals(tagNames.EXPR)) {
+        	result = parseExpression(el);
+        } else if (elementName.equals(tagNames.IND)) {
+        	result = parseInd(el);
+        } else if (elementName.equals(tagNames.DATA)) {
+        	result = parseData(el);
+        } else if (elementName.equals(tagNames.SKOLEM)) {
+        	result = parseSkolem(el);
+        } else if (elementName.equals(tagNames.VAR)) {
+        	result = parseVar(el);
+        } else if (elementName.equals(tagNames.SLOT)) {
+        	result =  parseSlot(el);
+        } else if (elementName.equals(tagNames.RESL)) {
+        	result = parseResl(el);
+        } else if (elementName.equals(tagNames.REPO)) {
+        	result = parseRepo(el);
+		} else {
+			throw new ParseException(String.format(
+					"Element (%s) not supported!", elementName));
         }
         
-        return true;
+        return result;
+    }
+    
+    /**
+     * Get the inner element with role tag skipped
+     * 
+     * (e.g. <arg><Atom>...</Atom></arg> returns
+     *       Atom element)
+     * 
+     * @param element Element for which role tags should be skipped
+     * @return Element with role tags skipped
+     */
+    private Element skipRoleTag(Element element)
+    {
+    	Element result = element;
+    	String elementName = element.getLocalName();
+    	
+    	boolean hasRoleTag = false;
+    	if (elementName.equals(tagNames.ARG)) {
+    		hasRoleTag = true;
+    		logger.warn("arg element skipped.");
+    	} else if (elementName.equals(tagNames.FORMULA)) {
+    		hasRoleTag = true;
+    		logger.warn("formula element skipped.");
+    	} else if (elementName.equals(tagNames.ACT)) {
+    		hasRoleTag = true;
+    		logger.warn("act element skipped.");
+    	} else if (elementName.equals(tagNames.DECLARE)) {
+    		hasRoleTag = true;
+    		logger.warn("declare element skipped.");
+    	} else if (elementName.equals(tagNames.STRONG)) {
+    		hasRoleTag = true;
+    		logger.warn("strong element skipped.");
+    	} else if (elementName.equals(tagNames.WEAK)) {
+    		hasRoleTag = true;
+    		logger.warn("weak element skipped.");
+    	} else if (elementName.equals(tagNames.TORSO)) {
+    		hasRoleTag = true;
+    		logger.warn("torso element skipped.");
+    	}
+    	
+    	if (hasRoleTag)
+    	{
+    		result = element.getChildElements().get(0);
+    	}
+    	
+    	return result;
+    }
+   
+   /**
+     * Parses all children of the given element with the parseDefaultElement
+     * method and returns all sub-terms created from those elements. 
+     * 
+     * @param element The element whose children should be parsed.
+     * @return A collection of Term objects generated from the children.
+     * @throws ParseException Thrown if the parseDefaultElement method is unable
+     * to handle one of element's children.
+     */
+    private Vector<Term> parseDefaultElements(Element element) throws ParseException
+    {
+    	Elements children = element.getChildElements();
+    	Vector<Term> subterms = new Vector<Term>();
+   	
+        for (int i = 0; i < children.size(); i++) {
+            Element child = children.get(i);
+            Term term = parseDefaultElement(child);
+            subterms.add(term);
+        }
+        
+        return subterms;
     }
     
     /**
@@ -1251,16 +1051,21 @@ public class RuleMLDocumentParser implements PreferenceChangeListener {
     }
    
     /**
-     * Get the first element which is not labeled with OID
-     * @param elements Elements to search for child
-     * @param startIndex Start index to start search at
-     * @return Index of the first element which is not labeled with OID 
-     */
+	 * Get the first element which is not labeled with OID
+	 * 
+	 * @param elements
+	 *            Elements to search for child
+	 * @param startIndex
+	 *            Start index to start search at
+	 * @return Index of the first element which is not labeled with OID. If not
+	 *         exist, returns -1.
+	 */
     private int getFirstChildElementIndex(Elements elements, int startIndex)
     {
     	for (int i = startIndex; i < elements.size(); i++)
     	{
-    		Element child = elements.get(i);
+    		Element child = skipRoleTag(elements.get(i));
+    		
     		if (!child.getLocalName().equals(tagNames.OID))
     		{
     			return i;
@@ -1270,36 +1075,55 @@ public class RuleMLDocumentParser implements PreferenceChangeListener {
     }
     
     /**
-     * Gets the count of elements which do not have OID as element name
-     * @param elements Elements to count
-     * @return Amount of elements which do not have OID as element name
+     * Parse the type attribute of <Expr>, <Ind>, <Data> and <Var> elements.
+     * 
+     * @param element The element whose type attribute sould be parsed.
+     * @return A unique numeric identifier generated by the type system.
+     * @throws ParseException Thrown if the type specified in the type
+     * attribute is invalid.
      */
-    private int getElementCount(Elements elements)
-    {
-    	int count = 0;
-    	for (int i = 0; i < elements.size(); i++)
-    	{
-    		Element child = elements.get(i);
-    		if (!child.getLocalName().equals(tagNames.OID))
-    		{
-    			count++;
-    		}
-    	}
-    	return count;
-    }
+    private int parseTypeAttribute(Element element) throws ParseException {
+		Attribute type = element.getAttribute(tagNames.TYPE);
+        
+        int typeid = Types.IOBJECT;
+        
+        if (type != null) {
+            typeid = Types.typeID(type.getValue().trim());
+            if (typeid == -1) {
+                throw new ParseException("Type " + type.getValue().trim() +
+                                         " is not defined.");
+            }
+        }
+        
+		return typeid;
+	}
     
     /**
-     * Updates the current settings given by the configuration UI
+     * Parse a simple element that just contains plain data (like <Ind> and
+     * <Data>).
+     * 
+     * @param element The element to parse
+     * 
+     * @return A Term data structure that represents the data element in a way
+     * that can be understood by the reasoning engine.
+     * 
+     * @throws ParseException Thrown if the type specified in the optional type
+     * attribute is invalid.
      */
-	public void preferenceChange(PreferenceChangeEvent arg0) {
-		readConfig();
-	}
-	
+    private Term parseSimpleElement(Element element) throws ParseException
+    {
+    	String symbol = element.getValue().trim();
+        int sym = SymbolTable.internSymbol(symbol);
+        int typeid = parseTypeAttribute(element);
+
+        return new Term(sym, SymbolTable.INOROLE, typeid);
+    }
+    
 	/**
-	 * Sets new configuration parameters given by the current configuration
+	 * Reset the internal variable name and variable type lookup tables.
 	 */
-	public void readConfig()
-	{
-		this.compatibilityMode = config.getRuleMLCompatibilityModeEnabled();
+	private void resetVariables() {
+		this.variableNames = new Vector<String>();
+		this.varClasses = new Hashtable<Integer, Vector<Integer>>();
 	}
 }
